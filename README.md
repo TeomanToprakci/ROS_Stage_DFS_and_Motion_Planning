@@ -60,3 +60,4 @@ I ran the setup in Gazebo, where tb3_1 successfully moves to the position of tb3
 The Euclidean distance is dynamically calculated by the service node, allowing tb3_1 to navigate accurately to tb3_2’s initial location.
 Results and Reflection:
 Through this task, I implemented communication between two robots in Gazebo using custom messages and services. I also gained experience in creating service nodes that interact with other nodes in a client-server relationship. This setup allowed for the flexible calculation of distances and smooth navigation of the robots in a simulated environment.
+-----------------------
