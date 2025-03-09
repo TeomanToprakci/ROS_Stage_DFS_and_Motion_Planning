@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+
+import rospy
+from geometry_msgs.msg import Twist, Point
+from tf.transformations import euler_from_quaternion
+from math import sqrt, pow, atan2, pi
+from beginner_tutorials.msg import coordinates
+from beginner_tutorials.srv import euclidean_distance
+import tf
+
+class GotoPoint():
+    def __init__(self):
+        rospy.init_node('turtlebot3_pointop_key', anonymous=False)
+        rospy.on_shutdown(self.shutdown)
+
+        self.target_position = Point()
+        self.target_received = False
+
+        self.cmd_vel = rospy.Publisher('/tb3_1/cmd_vel', Twist, queue_size=5)
+        self.target_sub = rospy.Subscriber('/tb3_2/coordinates', coordinates, self.update_target)
+
+        rospy.wait_for_service('/calculate_distance')
+        self.calculate_distance = rospy.ServiceProxy('/calculate_distance', euclidean_distance)
+
+        self.tf_listener = tf.TransformListener()
+        self.odom_frame = 'tb3_1/odom'
+        self.base_frame = 'tb3_1/base_footprint'
+
+        try:
+            self.tf_listener.waitForTransform(
+                self.odom_frame, 
+                self.base_frame, 
+                rospy.Time(), 
+                rospy.Duration(1.0)
+            )
+            
+            (trans, rot) = self.tf_listener.lookupTransform(self.odom_frame, self.base_frame, rospy.Time(0))
+            rospy.loginfo(f"Initial position: {trans}")
+            
+        except (tf.Exception, tf.ConnectivityException, tf.LookupException) as e:
+            rospy.logerr(f"TF Error: {e}")
+            rospy.signal_shutdown("tf Exception")
+            return
+
+        self.control_loop()
+
+    def update_target(self, msg):
+        self.target_position.x = msg.x
+        self.target_position.y = msg.y
+        self.target_received = True
+        rospy.loginfo(f"Received new target: x={msg.x}, y={msg.y}")
+
+    def control_loop(self):
+        r = rospy.Rate(20)
+        move_cmd = Twist()
+        last_log_time = rospy.Time.now()
+
+        # Add PID constants
+        KP_ANGULAR = 0.5  # Proportional constant for angular control
+        KP_LINEAR = 0.2   # Proportional constant for linear control
+
+        while not rospy.is_shutdown():
+            if not self.target_received:
+                rospy.loginfo_throttle(5, "Waiting for target coordinates...")
+                r.sleep()
+                continue
+
+            (current_position, current_rotation) = self.get_odom()
+            if current_position is None:
+                rospy.logwarn_throttle(1, "Could not get current position")
+                continue
+
+            try:
+                # Calculate Euclidean distance from related node
+                distance_request = self.calculate_distance(
+                    x1=current_position.x,
+                    y1=current_position.y,
+                    x2=self.target_position.x,
+                    y2=self.target_position.y
+                )
+                distance_to_target = distance_request.distance
+
+                path_angle = atan2(
+                    self.target_position.y - current_position.y,
+                    self.target_position.x - current_position.x
+                )
+
+                angle_difference = path_angle - current_rotation
+                angle_difference = (angle_difference + pi) % (2 * pi) - pi
+
+                if (rospy.Time.now() - last_log_time).to_sec() > 0.5:
+                    rospy.loginfo("----------------------------------------")
+                    rospy.loginfo(f"Distance: {distance_to_target:.3f}, Angle diff: {angle_difference:.3f}")
+                    rospy.loginfo(f"Commands - linear: {move_cmd.linear.x:.3f}, angular: {move_cmd.angular.z:.3f}")
+                    last_log_time = rospy.Time.now()
+
+                if distance_to_target > 0.08:
+                    move_cmd.angular.z = KP_ANGULAR * angle_difference
+                    move_cmd.angular.z = max(min(move_cmd.angular.z, 0.5), -0.5)
+                    
+                    forward_speed = KP_LINEAR * distance_to_target * (1 - abs(angle_difference)/pi)
+                    move_cmd.linear.x = min(forward_speed, 0.7)
+                else:
+                    move_cmd.linear.x = 0.0
+                    move_cmd.angular.z = 0.0
+                    self.cmd_vel.publish(move_cmd)
+                    self.target_received = False
+                    continue
+
+                self.cmd_vel.publish(move_cmd)
+
+            except rospy.ServiceException as e:
+                rospy.logerr(f"Service call failed: {e}")
+                continue
+
+            r.sleep()
+
+    def get_odom(self):
+        try:
+            (trans, rot) = self.tf_listener.lookupTransform(self.odom_frame, self.base_frame, rospy.Time(0))
+            rotation = euler_from_quaternion(rot)
+            return Point(*trans), rotation[2]
+        except (tf.Exception, tf.ConnectivityException, tf.LookupException):
+            rospy.logerr_throttle(1, "TF Exception in get_odom")
+            return None, None
+
+    def shutdown(self):
+        self.cmd_vel.publish(Twist())
+        rospy.sleep(1)
+
+if __name__ == '__main__':
+    try:
+        GotoPoint()
+    except rospy.ROSInterruptException:
+        rospy.loginfo("Shutdown program.")
